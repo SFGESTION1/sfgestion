@@ -1,7 +1,7 @@
 {
   "name": "naiom",
   "version": "1.0.0",
-  "description": "NAIOM - Multi-Agent Platform IA",
+  "description": "SFGestion - Multi-Agent Platform IA",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
@@ -9,6 +9,9 @@
   },
   "dependencies": {
     "groq-sdk": "^0.9.0",
-    "express": "^4.18.2"
+    "express": "^4.18.2",
+    "nodemailer": "^6.9.9",
+    "axios": "^1.6.7",
+    "cheerio": "^1.0.0"
   }
 }

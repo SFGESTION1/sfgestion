@@ -1,12 +1,23 @@
 const Groq = require('groq-sdk');
 const express = require('express');
 const path = require('path');
+const nodemailer = require('nodemailer');
+const axios = require('axios');
+const cheerio = require('cheerio');
 
 const app = express();
 const client = new Groq({ apiKey: process.env.GROQ_API_KEY });
 
 const MODEL_MAIN = 'llama-3.3-70b-versatile';
 const MODEL_FAST = 'llama-3.1-8b-instant';
+
+const GMAIL_USER = 'stanfrey27@gmail.com';
+const GMAIL_PASS = process.env.GMAIL_PASSWORD || 'znle eiqo eltx gohv';
+
+const transporter = nodemailer.createTransport({
+  service: 'gmail',
+  auth: { user: GMAIL_USER, pass: GMAIL_PASS }
+});
 
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
@@ -24,7 +35,7 @@ const AGENTS = {
     cost: 0,
     isOrchestrator: true,
     suggestions: [
-      'Lance une campagne de prospection pour des PME locales',
+      'Prospecte 5 PME à Chantilly sans site web et envoie les emails',
       'Crée un site vitrine + emails de démarchage',
       'Analyse mes priorités admin de la semaine'
     ],
@@ -35,12 +46,15 @@ const AGENTS = {
 - Nina (Admin): devis, contrats, courriers professionnels
 - Hugo (Pré-comptabilité): suivi de trésorerie, catégorisation de dépenses, rapports pour TPE/PME
 
-Ton rôle: analyser chaque demande, décider quel(s) agent(s) activer, coordonner leur travail et synthétiser les résultats.
+Tu as accès aux outils suivants:
+- delegate_to_agent: déléguer une tâche à un agent
+- find_companies: trouver de vraies PME/TPE sans site web à Chantilly
+- send_email: envoyer un vrai email depuis stanfrey27@gmail.com
 
-Quand tu reçois une demande:
-1. Identifie les agents concernés
-2. Délègue les tâches avec des instructions précises via l'outil delegate_to_agent
-3. Synthétise les résultats en une réponse cohérente
+Quand on te demande de prospecter:
+1. Utilise find_companies pour trouver de vraies entreprises
+2. Délègue à Alex pour rédiger les emails personnalisés
+3. Utilise send_email pour envoyer chaque email
 
 Réponds toujours en français de manière professionnelle et structurée.`
   },
@@ -65,8 +79,9 @@ Réponds toujours en français de manière professionnelle et structurée.`
 - Relances professionnelles non-intrusives
 - Scripts d'approche adaptés à chaque secteur (artisans, commerces, professions libérales)
 
-Ton style: direct, humain, sans jargon. Tu mets en avant la valeur business d'un site (visibilité, crédibilité, nouveaux clients).
-Toujours inclure un appel à l'action simple et clair.
+Quand on te donne le nom et le secteur d'une vraie entreprise, rédige un email de prospection ultra-personnalisé.
+Format de réponse: SUJET: [sujet de l'email] puis le corps de l'email.
+Ton style: direct, humain, sans jargon. Mets en avant la valeur business d'un site.
 Réponds en français.`
   },
   sam: {
@@ -88,10 +103,9 @@ Réponds en français.`
 - Briefs détaillés pour sites vitrines, e-commerce, portfolios
 - Structure de pages (homepage, services, à propos, contact, blog)
 - Prompts optimisés pour Claude et ChatGPT pour générer du code HTML/CSS/JS
-- Architecture et UX adaptées aux petites entreprises
 
 Pour chaque demande, tu fournis:
-1. Le brief complet du site (objectif, cible, ton, pages)
+1. Le brief complet du site
 2. La structure détaillée page par page
 3. Les prompts prêts à copier dans Claude ou ChatGPT
 
@@ -115,11 +129,10 @@ Réponds en français avec des livrables directement utilisables.`
     systemPrompt: `Tu es Clara, rédactrice web spécialisée pour les sites de PME/TPE. Tu maîtrises:
 - Pages d'accueil percutantes avec proposition de valeur claire
 - Pages services détaillées avec bénéfices clients
-- Pages "À propos" humaines et rassurantes
 - Textes optimisés SEO avec mots-clés locaux et sectoriels
 - Calls-to-action efficaces
 
-Ton style: clair, chaleureux, professionnel. Tu parles le langage des clients (pas de jargon).
+Ton style: clair, chaleureux, professionnel.
 Réponds en français.`
   },
   nina: {
@@ -140,11 +153,10 @@ Réponds en français.`
     systemPrompt: `Tu es Nina, assistante administrative spécialisée pour un freelance créateur de sites web et gestionnaire admin pour PME/TPE. Tu maîtrises:
 - Devis de création et refonte de sites web
 - Contrats de prestation (création, maintenance, SEO)
-- Courriers professionnels (relances, mises en demeure, confirmation de commande)
-- Documents administratifs pour PME/TPE
+- Courriers professionnels et documents administratifs
 
-Format de réponse: documents complets et directement utilisables, champs à compléter entre [crochets].
-Réponds en français avec des documents professionnels et prêts à l'emploi.`
+Format: documents complets et prêts à l'emploi, champs à compléter entre [crochets].
+Réponds en français.`
   },
   hugo: {
     id: 'hugo',
@@ -162,20 +174,9 @@ Réponds en français avec des documents professionnels et prêts à l'emploi.`
       "Génère un rapport financier simplifié pour un client TPE"
     ],
     systemPrompt: `Tu es Hugo, expert en pré-comptabilité et suivi financier pour PME/TPE. Tu maîtrises:
-- Tableaux de suivi de trésorerie (entrées/sorties)
-- Catégorisation de dépenses (charges fixes, variables, investissements)
-- Rapports financiers simplifiés pour dirigeants non-comptables
-- Préparation de données pour le comptable
-
-Format de réponse:
-## 💰 Situation financière
-[Résumé clair]
-
-## 📋 Détail par catégorie
-[Tableau structuré]
-
-## ⚡ Actions prioritaires
-[Top 3 actions]
+- Tableaux de suivi de trésorerie
+- Catégorisation de dépenses
+- Rapports financiers simplifiés
 
 Réponds en français avec des données claires et actionnables.`
   }
@@ -183,12 +184,88 @@ Réponds en français avec des données claires et actionnables.`
 
 const chatHistories = {};
 const agentStats = {};
-
 Object.keys(AGENTS).forEach(id => {
   chatHistories[id] = [];
   agentStats[id] = { deliverables: AGENTS[id].deliverables, tokens: AGENTS[id].tokens, cost: 0 };
 });
 
+// ─── Scraping Pages Jaunes ────────────────────────────
+async function findCompanies(city = 'Chantilly', category = '') {
+  try {
+    const query = category ? encodeURIComponent(category) : '';
+    const location = encodeURIComponent(city);
+    const url = `https://www.pagesjaunes.fr/annuaire/cherche?quoiqui=${query}&ou=${location}&univers=pagesjaunes`;
+
+    const { data } = await axios.get(url, {
+      timeout: 10000,
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'Accept-Language': 'fr-FR,fr;q=0.9',
+        'Accept-Encoding': 'gzip, deflate, br'
+      }
+    });
+
+    const $ = cheerio.load(data);
+    const companies = [];
+
+    $('.bi-content, .result-item, [class*="bi-"]').each((i, el) => {
+      if (companies.length >= 10) return false;
+
+      const name = $(el).find('[class*="denomination"], [class*="name"], h3, .ens-name').first().text().trim();
+      const address = $(el).find('[class*="address"], [class*="adresse"]').first().text().trim();
+      const phone = $(el).find('[class*="phone"], [class*="tel"]').first().text().trim();
+      const hasWebsite = $(el).find('a[href*="http"]:not([href*="pagesjaunes"])').length > 0;
+
+      if (name && name.length > 2 && !hasWebsite) {
+        companies.push({ name, address: address || city, phone: phone || 'Non renseigné', sector: category || 'Commerce/Services' });
+      }
+    });
+
+    // Si scraping échoue, utilise l'API gouvernementale française
+    if (companies.length === 0) {
+      return await findCompaniesGovAPI(city);
+    }
+
+    return companies;
+  } catch (err) {
+    console.error('Pages Jaunes scraping failed:', err.message);
+    return await findCompaniesGovAPI(city);
+  }
+}
+
+// Fallback: API officielle entreprises.data.gouv.fr
+async function findCompaniesGovAPI(city = 'Chantilly') {
+  try {
+    const url = `https://recherche-entreprises.api.gouv.fr/search?q=${encodeURIComponent(city)}&per_page=10&categorie_entreprise=PME,TPE`;
+    const { data } = await axios.get(url, { timeout: 8000 });
+
+    return (data.results || []).slice(0, 10).map(c => ({
+      name: c.nom_complet || c.nom_raison_sociale,
+      address: c.siege?.adresse || city,
+      phone: 'À rechercher',
+      sector: c.activite_principale_libelle || 'Commerce/Services',
+      siren: c.siren
+    })).filter(c => c.name);
+  } catch (err) {
+    console.error('Gov API failed:', err.message);
+    return [];
+  }
+}
+
+// ─── Envoi Gmail ──────────────────────────────────────
+async function sendEmail(to, subject, body) {
+  const info = await transporter.sendMail({
+    from: `"Stan - SFGestion" <${GMAIL_USER}>`,
+    to,
+    subject,
+    text: body,
+    html: body.replace(/\n/g, '<br>')
+  });
+  return info.messageId;
+}
+
+// ─── Sub-agent call ───────────────────────────────────
 async function callSubAgent(agentId, task, streamCallback) {
   const agent = AGENTS[agentId];
   if (!agent) throw new Error(`Agent ${agentId} not found`);
@@ -217,10 +294,10 @@ async function callSubAgent(agentId, task, streamCallback) {
   return fullResponse;
 }
 
+// ─── Main chat endpoint ───────────────────────────────
 app.post('/api/chat/:agentId', async (req, res) => {
   const { agentId } = req.params;
   const { message } = req.body;
-
   const agent = AGENTS[agentId];
   if (!agent) return res.status(404).json({ error: 'Agent not found' });
 
@@ -236,31 +313,55 @@ app.post('/api/chat/:agentId', async (req, res) => {
     chatHistories[agentId].push({ role: 'user', content: message });
 
     if (agent.isOrchestrator) {
-      const orchestratorTools = [{
-        type: 'function',
-        function: {
-          name: 'delegate_to_agent',
-          description: 'Délègue une tâche à un agent spécialisé',
-          parameters: {
-            type: 'object',
-            properties: {
-              agent_id: {
-                type: 'string',
-                enum: ['alex', 'sam', 'clara', 'nina', 'hugo'],
-                description: "ID de l'agent à activer"
+      const orchestratorTools = [
+        {
+          type: 'function',
+          function: {
+            name: 'delegate_to_agent',
+            description: 'Délègue une tâche à un agent spécialisé',
+            parameters: {
+              type: 'object',
+              properties: {
+                agent_id: { type: 'string', enum: ['alex', 'sam', 'clara', 'nina', 'hugo'] },
+                task: { type: 'string' }
               },
-              task: {
-                type: 'string',
-                description: "Tâche précise à confier à l'agent"
-              }
-            },
-            required: ['agent_id', 'task']
+              required: ['agent_id', 'task']
+            }
+          }
+        },
+        {
+          type: 'function',
+          function: {
+            name: 'find_companies',
+            description: 'Trouve de vraies PME/TPE sans site web à Chantilly',
+            parameters: {
+              type: 'object',
+              properties: {
+                category: { type: 'string', description: 'Secteur d\'activité (ex: restaurant, plombier, coiffeur). Laisser vide pour tous secteurs.' }
+              },
+              required: []
+            }
+          }
+        },
+        {
+          type: 'function',
+          function: {
+            name: 'send_email',
+            description: 'Envoie un vrai email depuis stanfrey27@gmail.com',
+            parameters: {
+              type: 'object',
+              properties: {
+                to: { type: 'string', description: 'Adresse email du destinataire' },
+                subject: { type: 'string', description: 'Sujet de l\'email' },
+                body: { type: 'string', description: 'Corps de l\'email' }
+              },
+              required: ['to', 'subject', 'body']
+            }
           }
         }
-      }];
+      ];
 
       const agentNames = { alex: 'Alex', sam: 'Sam', clara: 'Clara', nina: 'Nina', hugo: 'Hugo' };
-
       let messages = [
         { role: 'system', content: agent.systemPrompt },
         ...chatHistories[agentId]
@@ -288,25 +389,42 @@ app.post('/api/chat/:agentId', async (req, res) => {
           const toolResults = [];
 
           for (const toolCall of assistantMessage.tool_calls) {
+            const args = JSON.parse(toolCall.function.arguments || '{}');
+
             if (toolCall.function.name === 'delegate_to_agent') {
-              const { agent_id, task } = JSON.parse(toolCall.function.arguments);
+              const { agent_id, task } = args;
               const name = agentNames[agent_id] || agent_id;
-
               send({ type: 'delegation_start', agent_id, agent_name: name, task });
-
               let agentResponse = '';
               await callSubAgent(agent_id, task, (id, text) => {
                 agentResponse += text;
                 send({ type: 'agent_stream', agent_id: id, agent_name: name, text });
               });
-
               send({ type: 'delegation_end', agent_id, agent_name: name });
+              toolResults.push({ role: 'tool', tool_call_id: toolCall.id, content: agentResponse });
+            }
 
-              toolResults.push({
-                role: 'tool',
-                tool_call_id: toolCall.id,
-                content: agentResponse
-              });
+            else if (toolCall.function.name === 'find_companies') {
+              send({ type: 'orchestrator', text: '\n🔍 Recherche de vraies entreprises à Chantilly...\n' });
+              const companies = await findCompanies('Chantilly', args.category || '');
+              const result = companies.length > 0
+                ? `Entreprises trouvées à Chantilly sans site web:\n${companies.map((c, i) => `${i + 1}. ${c.name} — ${c.address} — Tél: ${c.phone} — Secteur: ${c.sector}`).join('\n')}`
+                : 'Aucune entreprise trouvée. Utilise des exemples réalistes pour Chantilly.';
+              send({ type: 'orchestrator', text: `\n✅ ${companies.length} entreprises trouvées\n` });
+              toolResults.push({ role: 'tool', tool_call_id: toolCall.id, content: result });
+            }
+
+            else if (toolCall.function.name === 'send_email') {
+              const { to, subject, body } = args;
+              try {
+                send({ type: 'orchestrator', text: `\n📧 Envoi de l'email à ${to}...\n` });
+                await sendEmail(to, subject, body);
+                send({ type: 'orchestrator', text: `✅ Email envoyé à ${to}\n` });
+                toolResults.push({ role: 'tool', tool_call_id: toolCall.id, content: `Email envoyé avec succès à ${to}` });
+              } catch (err) {
+                send({ type: 'orchestrator', text: `❌ Erreur envoi email: ${err.message}\n` });
+                toolResults.push({ role: 'tool', tool_call_id: toolCall.id, content: `Erreur: ${err.message}` });
+              }
             }
           }
 
@@ -344,7 +462,6 @@ app.post('/api/chat/:agentId', async (req, res) => {
       chatHistories[agentId].push({ role: 'assistant', content: fullResponse });
       agentStats[agentId].deliverables += 1;
       agentStats[agentId].tokens += Math.round(fullResponse.length / 4);
-
       send({ type: 'done' });
       res.end();
     }
@@ -360,7 +477,7 @@ app.get('/api/agents', (req, res) => {
     ...a,
     deliverables: agentStats[a.id]?.deliverables ?? a.deliverables,
     tokens: agentStats[a.id]?.tokens ?? a.tokens,
-    cost: agentStats[a.id]?.cost ?? 0
+    cost: 0
   })));
 });
 
